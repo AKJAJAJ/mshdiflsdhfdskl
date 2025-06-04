@@ -5,6 +5,7 @@ import queue
 import signal
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from loguru import logger # Added for logging
 
 
 def os_check() -> str:
@@ -59,14 +60,43 @@ def run_cmd(cmd_string, timeout=60):
         os.killpg(p.pid, signal.SIGTERM)
  
         # 注意：如果开启下面这两行的话，会等到执行完成才报超时错误，但是可以输出执行结果
-        (outs, errs) = p.communicate()
-        code = 0
-        msg = str(outs.decode(format))
- 
-        # code = 1
-        # msg = "[ERROR]Timeout Error: Command '" + cmd_string + "' timed out after " + str(timeout) + " seconds"
+        # 注意：如果开启下面这两行的话，会等到执行完成才报超时错误，但是可以输出执行结果
+        # (outs, errs) = p.communicate() # Removed this unreliable post-kill communicate
+        # msg = str(outs.decode(format)) # Removed
+
+        logger.warning(f"Command '{cmd_string}' timed out after {timeout} seconds. Attempting to kill process group.")
+        # p.kill() # kill() sends SIGKILL. terminate() sends SIGTERM.
+        # p.terminate() # SIGTERM is usually preferred for graceful shutdown.
+        # The os.killpg below should be sufficient if start_new_session=True was effective.
+        # However, calling terminate first is a good practice.
+        p.terminate()
+        try:
+            # For start_new_session=True, p.pid is the process group leader (PGID).
+            # os.killpg sends the signal to the entire process group.
+            os.killpg(p.pid, signal.SIGTERM) # Try SIGTERM first
+            logger.info(f"Successfully sent SIGTERM to process group {p.pid} for command '{cmd_string}'.")
+            # Optionally, wait a very short period and then send SIGKILL if still alive
+            # p.wait(timeout=1) # This might hang if process doesn't die from SIGTERM
+            # if p.poll() is None: # Check if process is still alive
+            #    logger.warning(f"Process group {p.pid} for '{cmd_string}' did not terminate with SIGTERM, sending SIGKILL.")
+            #    os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError as ple:
+            logger.warning(f"Failed to kill process group {p.pid} for '{cmd_string}': {ple}. Process might have already exited.")
+        except Exception as e_kill:
+            logger.error(f"Error during process group kill for command '{cmd_string}': {e_kill}")
+
+        # Ensure p.kill() is called as a final attempt if the process is still there,
+        # though os.killpg should handle children of the shell too.
+        # If the shell itself (p.pid) is the only process, p.kill() might be needed if os.killpg fails.
+        if p.poll() is None: # Check if process (shell) is still alive
+             p.kill() # SIGKILL to the shell process
+             logger.warning(f"Sent SIGKILL to main process {p.pid} for '{cmd_string}' as it was still alive after group kill attempts.")
+
+
+        code = 1 # Indicate error due to timeout
+        msg = f"[ERROR]Timeout Error: Command '{cmd_string}' timed out after {timeout} seconds"
     except Exception as e:
         code = 1
-        msg = "[ERROR]Unknown Error : " + str(e)
+        msg = f"[ERROR]Unknown Error : {str(e)}" # Use f-string for consistency
  
     return code, msg
